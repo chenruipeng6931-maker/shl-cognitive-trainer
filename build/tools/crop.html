@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF 切题工具 · Crop &amp; Tag</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#f4f6f9;color:#0f172a;font-family:-apple-system,"PingFang SC",system-ui,sans-serif;font-size:14px}
+  header{background:#0b1f3a;color:#fff;padding:12px 20px;position:sticky;top:0;z-index:50;display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+  header h1{font-size:15px;margin:0;font-weight:700}
+  header .note{font-size:12px;color:#9fb3cc}
+  header .sp{flex:1}
+  header button{background:#fff;border:0;border-radius:8px;padding:7px 14px;font:inherit;font-size:13px;cursor:pointer}
+  header button.primary{background:#1d4ed8;color:#fff}
+  .wrap{display:flex;gap:18px;align-items:flex-start;padding:18px 20px 80px;max-width:1500px;margin:0 auto}
+  .left{flex:1;min-width:0}
+  .right{width:330px;flex:none;position:sticky;top:64px;background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:14px;max-height:calc(100vh - 90px);overflow:auto}
+  .drop{border:2px dashed #cbd5e1;border-radius:12px;padding:34px;text-align:center;color:#64748b;background:#fff;cursor:pointer}
+  .drop:hover{border-color:#94a3b8}
+  .page{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:10px;margin-bottom:16px;position:relative}
+  .page .nm{font-size:12px;color:#94a3b8;margin-bottom:6px}
+  .cwrap{position:relative;display:inline-block;max-width:100%}
+  canvas{display:block;max-width:100%;height:auto;cursor:crosshair;border-radius:6px}
+  .band{position:absolute;border:2px solid #1d4ed8;background:rgba(29,78,216,.12);pointer-events:none;border-radius:2px}
+  .panel{position:fixed;left:50%;transform:translateX(-50%);bottom:22px;background:#0b1f3a;color:#fff;border-radius:12px;padding:12px 16px;display:none;gap:10px;align-items:center;z-index:100;box-shadow:0 8px 28px rgba(11,31,58,.34);flex-wrap:wrap;max-width:92vw}
+  .panel.show{display:flex}
+  .panel .lbl{font-size:12px;color:#9fb3cc}
+  .panel button{background:#1e3a5f;border:1px solid #2f537d;color:#fff;border-radius:8px;padding:7px 13px;font:inherit;font-weight:700;cursor:pointer}
+  .panel button:hover{background:#2f537d}
+  .panel select{background:#1e3a5f;border:1px solid #2f537d;color:#fff;border-radius:8px;padding:7px 9px;font:inherit;cursor:pointer}
+  .panel .cancel{background:transparent;border-color:#3b5f88;font-weight:400}
+  .item{border:1px solid #e2e8f0;border-radius:9px;padding:8px;margin-bottom:8px;display:flex;gap:9px;align-items:center}
+  .item canvas{border-radius:5px;border:1px solid #eef2f7;flex:none}
+  .item .meta{flex:1;min-width:0;font-size:12px;color:#64748b;line-height:1.4}
+  .item .meta b{color:#0f172a;font-size:14px}
+  .item .del{border:0;background:#fee2e2;color:#b91c1c;border-radius:6px;width:24px;height:24px;cursor:pointer;font-size:14px;line-height:1}
+  .stat{font-size:12px;color:#64748b;margin-bottom:10px}
+  .hint{font-size:12px;color:#94a3b8;line-height:1.6;margin-top:10px}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>PDF 切题工具</h1>
+  <span class="note">框选一道题 → 选答案 → 自动收录</span>
+  <span class="sp"></span>
+  <button id="btnExport" class="primary">导出 JSON</button>
+  <button id="btnUndo">撤销</button>
+  <button id="btnClear">清空</button>
+</header>
+
+<div class="wrap">
+  <div class="left" id="pages">
+    <div class="drop" id="drop">
+      点击选择（或拖入）页码图片<br>
+      <span style="font-size:12px">建议先用 build/pdf2png.sh 把 PDF 转成 pages/*.png</span>
+    </div>
+  </div>
+
+  <div class="right">
+    <div class="stat" id="stat">已收录 0 题</div>
+    <div id="list"></div>
+    <div class="hint">
+      操作：在页面上按住鼠标拖出一个方框，松开后在底部选 A–E，即可收录。<br><br>
+      绿色框＝已收录（框上标注了答案）。<br><br>
+      导出的 JSON 里，<code>rect</code> 是相对原图的像素坐标，站点用 background-position 裁切显示。
+    </div>
+  </div>
+</div>
+
+<div class="panel" id="panel">
+  <span class="lbl">正确答案</span>
+  <button data-ans="A">A</button>
+  <button data-ans="B">B</button>
+  <button data-ans="C">C</button>
+  <button data-ans="D">D</button>
+  <button data-ans="E">E</button>
+  <select id="selType">
+    <option value="series">序列推理</option>
+    <option value="matrix">矩阵补全</option>
+    <option value="analogy">图形类比</option>
+    <option value="odd">找异类</option>
+    <option value="classify">归类判断</option>
+  </select>
+  <button class="cancel" id="btnCancel">取消</button>
+</div>
+
+<input type="file" id="file" accept="image/*" multiple hidden>
+
+<script>
+(function(){
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const pages = [];   // {name, img}
+  const crops = [];   // {page, x, y, w, h, answer, type}
+  let pending = null; // {page, x, y, w, h}
+
+  const KEY = 'rg-crop-tool-v1';
+
+  function save(){
+    try { localStorage.setItem(KEY, JSON.stringify(crops)); } catch(e){}
+  }
+  function load(){
+    try {
+      const raw = localStorage.getItem(KEY);
+      if (raw) JSON.parse(raw).forEach(c => crops.push(c));
+    } catch(e){}
+  }
+
+  /* ---------- 载入图片 ---------- */
+  $('drop').addEventListener('click', () => $('file').click());
+  $('drop').addEventListener('dragover', (e) => { e.preventDefault(); });
+  $('drop').addEventListener('drop', (e) => {
+    e.preventDefault();
+    addFiles(e.dataTransfer.files);
+  });
+  $('file').addEventListener('change', (e) => addFiles(e.target.files));
+
+  function addFiles(files){
+    Array.from(files).filter(f => f.type.startsWith('image/')).forEach(f => {
+      const url = URL.createObjectURL(f);
+      const img = new Image();
+      img.onload = () => { pages.push({ name: f.name, img }); render(); };
+      img.src = url;
+    });
+  }
+
+  /* ---------- 渲染页面 ---------- */
+  function render(){
+    const host = $('pages');
+    host.innerHTML = '';
+    if (!pages.length) return;
+
+    pages.forEach((p) => {
+      const box = document.createElement('div');
+      box.className = 'page';
+      box.innerHTML = `<div class="nm">${p.name} · ${p.img.naturalWidth}×${p.img.naturalHeight}</div>`;
+
+      const cwrap = document.createElement('div');
+      cwrap.className = 'cwrap';
+
+      const cv = document.createElement('canvas');
+      cv.width = p.img.naturalWidth;
+      cv.height = p.img.naturalHeight;
+      const ctx = cv.getContext('2d');
+      ctx.drawImage(p.img, 0, 0);
+
+      // 画出已收录的框
+      crops.filter(c => c.page === p.name).forEach(c => {
+        ctx.strokeStyle = '#15803d';
+        ctx.lineWidth = Math.max(2, cv.width / 700);
+        ctx.strokeRect(c.x, c.y, c.w, c.h);
+        ctx.fillStyle = 'rgba(21,128,61,.9)';
+        const fs = Math.max(16, cv.width / 55);
+        ctx.font = `700 ${fs}px -apple-system, sans-serif`;
+        ctx.fillText(c.answer, c.x + 6, c.y + fs + 2);
+      });
+
+      cwrap.appendChild(cv);
+      box.appendChild(cwrap);
+      host.appendChild(box);
+
+      attachDrag(cv, cwrap, p);
+    });
+  }
+
+  /* ---------- 拖拽框选 ---------- */
+  function attachDrag(cv, cwrap, page){
+    let sx = 0, sy = 0, band = null, dragging = false;
+
+    const toNatural = (ev) => {
+      const r = cv.getBoundingClientRect();
+      const scale = cv.width / r.width;
+      return { x: (ev.clientX - r.left) * scale, y: (ev.clientY - r.top) * scale };
+    };
+    const toCss = (ev) => {
+      const r = cv.getBoundingClientRect();
+      return { x: ev.clientX - r.left, y: ev.clientY - r.top };
+    };
+
+    cv.addEventListener('mousedown', (ev) => {
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      dragging = true;
+      const n = toNatural(ev);
+      sx = n.x; sy = n.y;
+      const c = toCss(ev);
+      band = document.createElement('div');
+      band.className = 'band';
+      band.style.left = c.x + 'px';
+      band.style.top = c.y + 'px';
+      band.style.width = '0px';
+      band.style.height = '0px';
+      cwrap.appendChild(band);
+    });
+
+    cv.addEventListener('mousemove', (ev) => {
+      if (!dragging || !band) return;
+      const a = toCss(ev);
+      const r = cv.getBoundingClientRect();
+      const s = cv.width / r.width;
+      const startCssX = sx / s, startCssY = sy / s;
+      const x = Math.min(startCssX, a.x), y = Math.min(startCssY, a.y);
+      band.style.left = x + 'px';
+      band.style.top = y + 'px';
+      band.style.width = Math.abs(a.x - startCssX) + 'px';
+      band.style.height = Math.abs(a.y - startCssY) + 'px';
+    });
+
+    const finish = (ev) => {
+      if (!dragging) return;
+      dragging = false;
+      const n = toNatural(ev);
+      const x = Math.min(sx, n.x), y = Math.min(sy, n.y);
+      const w = Math.abs(n.x - sx), h = Math.abs(n.y - sy);
+      if (band) { band.remove(); band = null; }
+      if (w < 24 || h < 24) { pending = null; hidePanel(); return; }
+      pending = { page: page.name, x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) };
+      showPanel();
+    };
+    cv.addEventListener('mouseup', finish);
+    cv.addEventListener('mouseleave', (ev) => { if (dragging) finish(ev); });
+  }
+
+  /* ---------- 答案面板 ---------- */
+  function showPanel(){ $('panel').classList.add('show'); }
+  function hidePanel(){ $('panel').classList.remove('show'); }
+
+  document.querySelectorAll('#panel [data-ans]').forEach(b => {
+    b.addEventListener('click', () => commit(b.dataset.ans));
+  });
+  $('btnCancel').addEventListener('click', () => { pending = null; hidePanel(); });
+
+  function commit(answer){
+    if (!pending) return;
+    crops.push(Object.assign({}, pending, { answer, type: $('selType').value }));
+    pending = null;
+    hidePanel();
+    save();
+    render();
+    renderList();
+  }
+
+  /* ---------- 列表 ---------- */
+  function renderList(){
+    $('stat').textContent = `已收录 ${crops.length} 题`;
+    const host = $('list');
+    host.innerHTML = '';
+    crops.forEach((c, i) => {
+      const page = pages.find(p => p.name === c.page);
+      const el = document.createElement('div');
+      el.className = 'item';
+
+      const thumb = document.createElement('canvas');
+      const tw = 96;
+      const th = Math.max(24, Math.round(tw * c.h / c.w));
+      thumb.width = tw; thumb.height = th;
+      if (page) {
+        thumb.getContext('2d').drawImage(page.img, c.x, c.y, c.w, c.h, 0, 0, tw, th);
+      }
+      el.appendChild(thumb);
+
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.innerHTML = `<b>${c.answer}</b> · ${c.type}<br>${c.page}<br>${c.w}×${c.h}`;
+      el.appendChild(meta);
+
+      const del = document.createElement('button');
+      del.className = 'del';
+      del.textContent = '×';
+      del.addEventListener('click', () => {
+        crops.splice(i, 1); save(); render(); renderList();
+      });
+      el.appendChild(del);
+
+      host.appendChild(el);
+    });
+  }
+
+  /* ---------- 操作 ---------- */
+  $('btnUndo').addEventListener('click', () => {
+    crops.pop(); save(); render(); renderList();
+  });
+  $('btnClear').addEventListener('click', () => {
+    if (!confirm('清空所有已收录的题目？')) return;
+    crops.length = 0; save(); render(); renderList();
+  });
+  $('btnExport').addEventListener('click', () => {
+    if (!crops.length) { alert('还没有收录任何题目'); return; }
+    const blob = new Blob([JSON.stringify(crops, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'bank-pdf.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+
+  load();
+  renderList();
+})();
+</script>
+</body>
+</html>

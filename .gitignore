@@ -1,0 +1,16 @@
+# 从 PDF 裁剪的原始图片（不公开）
+pdfbank/q-*.png
+pdfbank/a-*.png
+
+# PDF 原始提取的中间产物
+pdfbank/pdfbank.js
+pdfbank/pdfbank.processed.js
+
+# 构建缓存
+__pycache__/
+*.pyc
+build/tools/out/
+build/translate/*.json
+
+# 系统
+.DS_Store
